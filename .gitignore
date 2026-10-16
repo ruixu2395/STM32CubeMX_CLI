@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# ---------------------------------------------------------------- 打包产物
+# 仓库里的 exe 只留一份：.claude/skills/cubemx-configure/cubemx-cli.exe
+# （它随 skill 一起分发，拷到哪儿都能跑）。要自己打时：
+#     pyinstaller packaging/cubemx-cli.spec --noconfirm
+build/
+dist/
+
+# ---------------------------------------------------------------- 实测现场
+# 拿 CubeMX 官方 XML 和 524 份板级工程量数据时用的一次性脚本、被反复改写的
+# .ioc 副本、命令输出。量出来的**结论**已经写进
+# .claude/skills/cubemx-configure/references/，现场本身不必进库。
+_probe/
+rt1/
+rtA/
+rtB/
+rtC/
+Gt5/
+
+# 每次真正落盘前留的备份（同目录、带时间戳）
+*.ioc.bak-*
+
+# ---------------------------------------------------------------- 本地笔记
+# 项目最初的需求/约束清单，写给自己看的
+1.txt
+
+# Claude Code 的本地设置（skill 本身要进库，别整个忽略 .claude/）
+.claude/settings.local.json

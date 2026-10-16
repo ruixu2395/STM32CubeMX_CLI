@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cubemx-cli"
+version = "0.1.0"
+description = "读写 STM32CubeMX 工程（.ioc），供 AI Agent 配置引脚与外设：直改 .ioc + 按 CubeMX 数据库五层校验"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+#: 打包成 exe 才需要。单独一组：装它的人只是想构建，不是想开发。
+build = ["pyinstaller>=6"]
+
+[project.scripts]
+cubemx-cli = "cubemx_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
