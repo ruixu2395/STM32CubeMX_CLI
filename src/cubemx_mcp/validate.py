@@ -444,7 +444,7 @@ def check_parameters(project: IocProject) -> tuple[list[Issue], str | None]:
             near = get_close_matches(key, sorted(allowed), n=1, cutoff=0.5)
             issues.append(
                 Issue(
-                    "error",
+                    "warning",
                     "param.not_in_mode",
                     f"{name}.{key} 不属于模式 {mode} 的参数",
                     subject=name,
@@ -456,18 +456,13 @@ def check_parameters(project: IocProject) -> tuple[list[Issue], str | None]:
         for key, value in sorted(props.items()):
             if key in ("VirtualMode", "VirtualType"):
                 continue
-            if mdb.is_valid_value(key, value):
+            problem = mdb.check_value(key, value)
+            if problem is not None:
+                issues.append(Issue("error", "param.bad_value", f"{name}.{problem}", subject=name))
                 continue
-            d = mdb.param(key)
-            issues.append(
-                Issue(
-                    "error",
-                    "param.bad_value",
-                    f"{name}.{key}={value} 不在取值范围内",
-                    subject=name,
-                    hint=f"可选：{', '.join(d.values)}" if d else None,
-                )
-            )
+            hint = mdb.check_range(key, value)
+            if hint is not None:
+                issues.append(Issue("warning", "param.out_of_range", f"{name}.{hint}", subject=name))
     # 登记表那两条检查不需要数据库，上面已经跑完；只有"参数名属于哪个模式"和
     # "取值是否合法"要查模式库。不能说成"全层通过"。
     return issues, ("参数名与取值（缺 CubeMX 数据库）" if device is None else None)
@@ -483,11 +478,27 @@ def check_gpio_parameters(project: IocProject) -> list[Issue]:
     ST 官方的板级文件里每个带 GPIO 参数的引脚都写了这一行。
     """
     issues: list[Issue] = []
+    gpio_db = project.device.modes("GPIO") if project.device is not None else None
     for pin in project.pins():
         if is_virtual_pin(pin.name):
             continue  # VP_* 由 CubeMX 自管，登记表不按这套规则
         registered = set(pin.parameters)
         props = pin.values
+        if gpio_db is not None:
+            for key, value in sorted(props.items()):
+                if key in PIN_STRUCTURAL_KEYS:
+                    continue
+                problem = gpio_db.check_value(key, value)
+                if problem is None:
+                    continue
+                issues.append(
+                    Issue(
+                        "error",
+                        "gpio.bad_value",
+                        f"{pin.name}.{problem}（CubeMX 加载时会丢弃这项配置）",
+                        subject=pin.name,
+                    )
+                )
         for key in sorted(props):
             if key not in registered and key not in PIN_STRUCTURAL_KEYS:
                 issues.append(
@@ -707,23 +718,64 @@ def blocking_errors(report: Report) -> list[Issue]:
     return [i for i in report.errors if i.code not in INCOMPLETE_CODES]
 
 
-def validate(project: IocProject, *, device: Device | None = None) -> Report:
-    """跑完全部校验。``project.device`` 为空时用 ``device`` 兜底。"""
+def validate(
+    project: IocProject,
+    *,
+    device: Device | None = None,
+    fast: bool = False,
+    skip_checks: set[str] | None = None,
+) -> Report:
+    """跑完全部校验。``project.device`` 为空时用 ``device`` 兜底。
+    
+    Args:
+        project: 工程对象
+        device: MCU 设备数据库（兜底）
+        fast: 快速模式，只跑核心校验（引脚能力 + 归属登记）
+        skip_checks: 要跳过的检查集合，可选值：
+            'pin_capability', 'modes', 'parameters', 'registration',
+            'gpio_parameters', 'duplicate_signals', 'nvic_keys', 'irq_dma_orphans'
+    """
     if device is not None and project.device is None:
         project.device = device
 
+    skip_checks = skip_checks or set()
     report = Report()
-    for fn in (check_pin_capability, check_modes, check_parameters):
-        found, skipped = fn(project)
-        report.add(*found)
-        if skipped:
-            report.skipped.append(skipped)
+    
+    if fast:
+        # 快速模式：只跑最核心的检查
+        if 'pin_capability' not in skip_checks:
+            found, skipped = check_pin_capability(project)
+            report.add(*found)
+            if skipped:
+                report.skipped.append(skipped)
+        
+        if 'registration' not in skip_checks:
+            report.add(*check_registration(project))
+        
+        return report
+    
+    # 完整模式：按需跑所有检查
+    for name, fn in [
+        ('pin_capability', check_pin_capability),
+        ('modes', check_modes),
+        ('parameters', check_parameters),
+    ]:
+        if name not in skip_checks:
+            found, skipped = fn(project)
+            report.add(*found)
+            if skipped:
+                report.skipped.append(skipped)
 
-    report.add(*check_registration(project))
-    report.add(*check_gpio_parameters(project))
-    report.add(*check_duplicate_signals(project))
-    report.add(*check_nvic_keys(project))
-    report.add(*check_irq_dma_orphans(project))
+    for name, fn in [
+        ('registration', check_registration),
+        ('gpio_parameters', check_gpio_parameters),
+        ('duplicate_signals', check_duplicate_signals),
+        ('nvic_keys', check_nvic_keys),
+        ('irq_dma_orphans', check_irq_dma_orphans),
+    ]:
+        if name not in skip_checks:
+            report.add(*fn(project))
+    
     return report
 
 

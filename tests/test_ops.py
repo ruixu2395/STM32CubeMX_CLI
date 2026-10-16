@@ -359,15 +359,38 @@ def test_add_peripheral_accepts_params(db_project: IocProject):
     assert "BaudRate" in db_project.find_peripheral("USART2").parameters
 
 
-def test_add_peripheral_rejects_a_param_not_in_the_mode(db_project: IocProject):
-    with pytest.raises(OpError, match="ClockPolarity"):
-        ops.add_peripheral(db_project, "USART2", params={"ClockPolarity": "HIGH"})
+def test_add_peripheral_warns_but_writes_a_param_not_in_the_mode(db_project: IocProject):
+    result = ops.add_peripheral(db_project, "USART2", params={"ClockPolarity": "HIGH"})
+    assert any("⚠" in c and "ClockPolarity" in c for c in result.changes)
+    assert db_project.doc.get("USART2.ClockPolarity") == "HIGH"
 
 
 def test_add_peripheral_rejects_a_bad_param_value(db_project: IocProject):
     with pytest.raises(OpError) as exc:
         ops.add_peripheral(db_project, "USART2", params={"Parity": "NONSENSE"})
     assert "PARITY_NONE" in str(exc.value)  # 列出合法取值
+    assert db_project.find_peripheral("USART2") is None  # 没写一半
+
+
+def test_set_peripheral_rejects_a_bad_param_value(db_project: IocProject):
+    with pytest.raises(OpError, match="PARITY_NONE"):
+        ops.set_peripheral(db_project, "USART1", params={"Parity": "NONSENSE"})
+
+
+def test_add_gpio_rejects_a_bad_pull_value_and_suggests_the_right_one(db_project: IocProject):
+    with pytest.raises(OpError) as exc:
+        ops.add_gpio(db_project, "PC13", mode="Input", props={"GPIO_PuPd": "GPIO_UP"})
+    assert "GPIO_PULLUP" in str(exc.value)
+
+
+def test_set_pin_accepts_a_valid_pull_value(db_project: IocProject):
+    ops.add_gpio(db_project, "PC13", mode="Input", props={"GPIO_PuPd": "GPIO_PULLUP"})
+    assert db_project.doc.get("PC13-ANTI_TAMP.GPIO_PuPd") == "GPIO_PULLUP"
+
+
+def test_set_pin_rejects_a_bad_speed_value(db_project: IocProject):
+    with pytest.raises(OpError, match="GPIO_SPEED_FREQ_LOW"):
+        ops.set_pin(db_project, "PA9", props={"GPIO_Speed": "FAST"})
 
 
 def test_add_peripheral_rejects_an_unknown_mode(db_project: IocProject):

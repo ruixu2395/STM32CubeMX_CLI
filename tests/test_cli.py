@@ -1,4 +1,4 @@
-"""`cubemx_mcp.cli` —— 命令行入口。
+﻿"""`cubemx_mcp.cli` —— 命令行入口。
 
 最重要的一组是**写闸门**：校验不过时磁盘上的文件必须一个字节都不变。
 这不是"顺手测一下"，而是整个工具敢让 AI 直接调的前提。
@@ -351,7 +351,7 @@ def test_remove_peripheral_keep_pins(tmp_ioc: Path):
 
 def test_add_gpio(tmp_ioc: Path):
     assert main(["add-gpio", str(tmp_ioc), "PC13", "--mode", "Output",
-                 "--label", "KEY", "--set", "GPIO_PuPd=GPIO_UP"]) == EXIT_OK
+                 "--label", "KEY", "--set", "GPIO_PuPd=GPIO_PULLUP"]) == EXIT_OK
 
     text = tmp_ioc.read_text(encoding="utf-8")
     assert "PC13-ANTI_TAMP.Signal=GPIO_Output" in text
@@ -522,7 +522,6 @@ def test_the_original_file_survives_every_failed_command(tmp_ioc: Path):
         ["set-pin", str(tmp_ioc), "PA9", "--mode", "Nonsense"],
         ["add-peripheral", str(tmp_ioc), "USART9"],
         ["add-peripheral", str(tmp_ioc), "USART2", "--rr", "PA4"],
-        ["set-peripheral", str(tmp_ioc), "USART1", "--param", "NoSuchParam=1"],
         ["remove-peripheral", str(tmp_ioc), "UART7"],
         ["enable-irq", str(tmp_ioc), "NoSuch_IRQn"],
         ["add-dma", str(tmp_ioc), "USART9_RX"],

@@ -26,7 +26,7 @@ from difflib import get_close_matches
 
 from .db import DmaDb, Device, IrqDb
 from .ioc import signals as sig
-from .ioc.project import IocProject, Pin, ProjectError
+from .ioc.project import IocProject, Pin, ProjectError, is_virtual_pin
 
 #: 虚拟信号前缀。``VS_ClockSourceINT`` 这类不占真实引脚，对应一个
 #: ``VP_<IP>_<Signal>`` 虚拟引脚项。
@@ -127,6 +127,7 @@ def set_pin(
     "改动"，否则 CLI 会白写一次盘、白留一份备份，还谎报有变动。
     """
     pin_name = resolve_pin(project, name)
+    _check_gpio_values(project, props)
     changes: list[str] = []
     pin = project.find_pin(pin_name)
     if pin is None:
@@ -173,6 +174,22 @@ def set_pin(
             project.add_peripheral(owner)
             changes.append(f"登记外设 {owner}")
     return changes
+
+
+def _check_gpio_values(project: IocProject, props: dict[str, str] | None) -> None:
+    """引脚参数取值按 GPIO 模式库（``GPIO-*_Modes.xml``）核对，写之前就拒。
+
+    ``GPIO_UP`` 这种错值 CubeMX 不报错，而是**静默丢掉整块配置**（实测 EXTI 边沿
+    被重置、中断被删），事后极难排查 —— 所以这里是硬拦，并直接给出可选值。
+    """
+    if not props or project.device is None:
+        return
+    gpio_db = project.device.modes("GPIO")
+    if gpio_db is None:
+        return
+    problems = [p for k, v in props.items() if (p := gpio_db.check_value(k, v))]
+    if problems:
+        raise OpError("；".join(problems))
 
 
 def _owner_for_signal(project: IocProject, signal: str) -> str | None:
@@ -226,6 +243,11 @@ def set_peripheral(
     per = project.find_peripheral(key)
     assert per is not None
 
+    mdb = project.device.modes(key) if project.device is not None else None
+    if mdb is not None:
+        bad = [p for k, v in (params or {}).items() if (p := mdb.check_value(k, v))]
+        if bad:
+            raise OpError("；".join(bad))
     if virtual is not None and per.virtual != virtual:
         per.set_virtual(virtual[0], virtual[1])
         changes.append(f"{key}.{virtual[0]} = {virtual[1]}")
@@ -293,6 +315,7 @@ def add_gpio(
         if not cap.can(signal):
             avail = ", ".join(sorted(cap.gpio_modes)) or "无"
             raise OpError(f"{pin_name} 不支持 {mode}（该脚支持：{avail}）")
+        _check_gpio_values(project, props)
 
     pin = project.find_pin(pin_name)
     # Pin 是活视图，不存在时新建一个也只是"指向这些键"的句柄，不产生副作用
@@ -490,6 +513,11 @@ def add_peripheral(
             allocations.append(Allocation(short, full, candidates[0], source="auto"))
             taken.add(candidates[0])
 
+    # ---- 参数取值先核对：错了直接拒，报错里带可选值（到这里还没动工程）
+    bad = [p for k, v in (params or {}).items() if (p := mdb.check_value(k, v))]
+    if bad:
+        raise OpError("；".join(bad))
+
     # ---- 落库（到这里才动工程，前面全是检查）
     for alloc in allocations:
         if alloc.virtual:
@@ -520,21 +548,19 @@ def add_peripheral(
 
     # ---- 参数
     allowed = mdb.mode_params(mode_def.name)
+    # 取值在库里有明确清单/范围的，错了直接拒（报错里带可选值，一次就能改对）；
+    # 参数**名**对不上模式只告警照写 —— 模式参数表按条件合并，名字清单不一定全。
     for pname, pvalue in (params or {}).items():
         if not force and allowed and pname not in allowed:
             suggest = ", ".join(sorted(p for p in allowed if p.lower().startswith(pname.lower()[:3])))
-            raise OpError(
-                f"模式 {mode_def.name} 不支持参数 {pname!r}。"
-                + (f"你是不是想写 {suggest}？" if suggest else f"可用参数：{', '.join(sorted(allowed))}")
-            )
-        if not mdb.is_valid_value(pname, pvalue):
-            d = mdb.param(pname)
-            raise OpError(
-                f"{pname}={pvalue} 不在取值范围内，可选：{', '.join(d.values)}"
-                if d else f"{pname}={pvalue} 取值非法"
+            changes.append(
+                f"⚠ 模式 {mode_def.name} 的参数表里没有 {pname!r}，仍照写"
+                + (f"（相近：{suggest}）" if suggest else "")
             )
         per.set_param(pname, pvalue)
         changes.append(f"{key}.{pname} = {pvalue}")
+        if (hint := mdb.check_range(pname, pvalue)):
+            changes.append(f"⚠ {hint}")
 
     return AddResult(ip=key, mode=mode_def.name, virtual=virt,
                      allocations=allocations, changes=changes)
@@ -833,15 +859,17 @@ def add_dma(
         )
 
     supplied = dict(params or {})
-    for pname in supplied:
-        if pname not in req.settable:
-            raise OpError(
-                f"{request} 没有可设参数 {pname!r}。可设：{', '.join(req.settable) or '（无）'}"
-            )
+    warnings: list[str] = []
     for pname, pvalue in supplied.items():
+        if pname not in req.settable:
+            warnings.append(
+                f"⚠ {request} 的可设参数里没有 {pname!r}，仍照写"
+                f"（可设：{', '.join(req.settable) or '无'}）"
+            )
+            continue
         d = dma_db.param(pname)
         if d is not None and d.values and pvalue not in d.values:
-            raise OpError(f"{pname}={pvalue} 不在取值范围内，可选：{', '.join(d.values)}")
+            raise OpError(f"{pname}={pvalue} 不在取值范围内。可选：{', '.join(d.values)}")
 
     # 值：Instance + 硬件定死的 + 有默认值的可调项 + 用户点名要的。
     # 派生项（`IpInstance` / `DMA_Handle`）不写 —— 它们是 CubeMX 生成物，不是配置。
@@ -873,7 +901,7 @@ def add_dma(
         names = list(values)
 
     idx = _dma_count(project)
-    changes = [f"{request} → {stream}（槽位 {idx}）"]
+    changes = [f"{request} → {stream}（槽位 {idx}）", *warnings]
     project.doc.set(f"Dma.Request{idx}", request)
     project.doc.set("Dma.RequestsNb", str(idx + 1))
     for pname in names:
@@ -1103,6 +1131,8 @@ class PinRow:
     params: tuple[tuple[str, str], ...] = ()
     #: 这颗脚现在这个模式下能改的 GPIO 参数名
     settable: tuple[str, ...] = ()
+    #: 可设参数 -> (可选值, 默认值)；库里没有枚举的参数不在这里
+    options: tuple[tuple[str, tuple[str, ...], str | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1155,12 +1185,22 @@ _GPIO_INTERNAL = frozenset({"GPIOx", "GPIO_Pin", "GPIO_AF"})
 _GPIO_SYNTHETIC = ("GPIO_Label",)
 
 
+def _gpio_db_mode(pin) -> str | None:
+    """引脚在 GPIO 模式库里对应哪个模式：GPIO 脚按 signal（``GPIO_Output`` ->
+    ``Output``，``GPXTI3`` -> ``EXTI``），外设脚按复用功能（``GPIO``）。"""
+    return sig.gpio_mode_of(pin.signal or "") or pin.mode
+
+
 def _gpio_settable(gpio_db, mode: str | None) -> tuple[str, ...]:
     """这颗脚在 ``mode`` 下能改哪些 GPIO 参数。
 
     数据库里 GPIO 的"模式"（``Input``/``Output``/``Analog``/``EXTI``/``GPIO``）
     和引脚上的 ``Mode`` 只在 GPIO 脚上同名 —— 外设脚写的是 ``Asynchronous``
     这类，那时按 ``GPIO`` 那个模式（复用功能）算。
+
+    ``GPIO_ModeDefault*`` **要列出来**：Output 的推挽/开漏、EXTI 的触发沿就是靠
+    它们设的（``.ioc`` 里写的正是 ``GPIO_ModeDefaultEXTI``），藏掉它们等于让人
+    猜键名。只藏真正的派生值和 LL 专用项。
     """
     if gpio_db is None:
         return _GPIO_SYNTHETIC
@@ -1170,9 +1210,20 @@ def _gpio_settable(gpio_db, mode: str | None) -> tuple[str, ...]:
         names = gpio_db.mode_params("GPIO")
     keep = sorted(
         n for n in names
-        if n not in _GPIO_INTERNAL and "Default" not in n and not n.endswith("_LL")
+        if n not in _GPIO_INTERNAL and not n.endswith("_LL")
     )
     return tuple(keep) + _GPIO_SYNTHETIC
+
+
+def _gpio_options(gpio_db, names) -> tuple[tuple[str, tuple[str, ...], str | None], ...]:
+    if gpio_db is None:
+        return ()
+    out = []
+    for n in names:
+        d = gpio_db.param(n)
+        if d is not None and d.values:
+            out.append((n, d.values, d.default))
+    return tuple(out)
 
 
 def _nvic_state(project: IocProject) -> dict[str, tuple[bool, int | None, int | None]]:
@@ -1416,8 +1467,16 @@ def inspect(project: IocProject, ip: str, page: str | None = None) -> InspectRes
         gpio_db = device.modes("GPIO")
         rows = []
         for pin in project.pins():
-            if owner_of(project, pin) != key:
+            if is_virtual_pin(pin.name):
                 continue
+            # `list <工程> GPIO`：GPIO 脚（GPIO_Output / GPXTI3 …）没有"归属外设"，
+            # 按 owner 过滤会一个都列不出来 —— 它们就是 GPIO 这一页的全部内容。
+            if key == "GPIO":
+                if not sig.is_gpio_signal(pin.signal or ""):
+                    continue
+            elif owner_of(project, pin) != key:
+                continue
+            settable = _gpio_settable(gpio_db, _gpio_db_mode(pin))
             # 只报登记进 `GPIOParameters` 的那些 —— `pin.values` 连 Signal/Mode
             # 这些顶层字段一起给，那不是"GPIO 参数"。
             rows.append(PinRow(
@@ -1428,7 +1487,8 @@ def inspect(project: IocProject, ip: str, page: str | None = None) -> InspectRes
                 params=tuple(
                     (n, pin.get_property(n) or "") for n in sorted(pin.parameters)
                 ),
-                settable=_gpio_settable(gpio_db, pin.mode),
+                settable=settable,
+                options=_gpio_options(gpio_db, settable),
             ))
         pins = tuple(rows)
 

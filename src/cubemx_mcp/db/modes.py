@@ -207,10 +207,43 @@ class ModeDb:
 
     def is_valid_value(self, param: str, value: str) -> bool:
         """参数值是否合法。没见过的参数、或不是枚举类型的，一律放行。"""
+        return self.check_value(param, value) is None
+
+    def check_value(self, param: str, value: str) -> str | None:
+        """按库里的 ``PossibleValue`` 枚举核对取值，合法返回 None，否则返回原因
+        （含最接近的写法和全部可选值）。
+
+        放行：库里没这个参数、不是枚举、值是逗号分隔的多选（``PinAttribute``）。
+        """
         d = self.params.get(param)
-        if d is None or not d.values:
-            return True
-        return value in d.values
+        # 只列了一个可选值的，多半是"在某条件下锁定为它"（实测 FMC 时序 `可选：15`、
+        # RIF `可选：true`），官方示例工程里写的却是别的值 —— 不能当取值全集。
+        if d is None or len(d.values) < 2:
+            return None
+        if value in d.values or "," in value:
+            return None
+        from difflib import get_close_matches
+
+        near = get_close_matches(value, d.values, n=1, cutoff=0.4)
+        return (
+            f"{param}={value} 不在取值范围内。"
+            + (f"你是不是想写 {near[0]}？" if near else "")
+            + f"可选：{', '.join(d.values)}"
+        )
+
+    def check_range(self, param: str, value: str) -> str | None:
+        """按 ``Min``/``Max`` 核对数值。**只能当提示用**：库里的范围常带条件
+        （波特率上限随时钟变、下限写成 ``=#Window`` 这种表达式），本工具不求值。
+        """
+        d = self.params.get(param)
+        if d is None or d.values:
+            return None
+        lo, hi, num = _num(d.minimum), _num(d.maximum), _num(value)
+        if num is None or (lo is None and hi is None):
+            return None
+        if (lo is not None and num < lo) or (hi is not None and num > hi):
+            return f"{param}={value} 超出库里的范围 [{d.minimum}, {d.maximum}]（该范围可能随配置变化）"
+        return None
 
     def default_value(self, param: str) -> str | None:
         d = self.params.get(param)
@@ -218,6 +251,17 @@ class ModeDb:
 
     def __repr__(self) -> str:
         return f"ModeDb({len(self.modes)} modes, {len(self.params)} params)"
+
+
+def _num(text: str | None) -> float | None:
+    """``"128"`` / ``"0x1F"`` -> 数字；表达式（``$x*2``）或空返回 None。"""
+    if text is None:
+        return None
+    s = text.strip()
+    try:
+        return float(int(s, 16)) if s.lower().startswith("0x") else float(s)
+    except ValueError:
+        return None
 
 
 @lru_cache(maxsize=32)

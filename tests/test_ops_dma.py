@@ -301,14 +301,12 @@ def test_a_request_with_no_candidate_channels_is_not_called_a_conflict(
     assert "--stream" in message
 
 
-def test_add_dma_rejects_a_stream_that_is_not_in_the_fixture(
+def test_add_dma_warns_but_writes_an_unknown_param(
     db_project: IocProject,
 ) -> None:
-    """非法参数名要在**写任何键之前**就被拒 —— 别留下一半的改动。"""
-    before = _dma_keys(db_project)
-    with pytest.raises(ops.OpError):
-        ops.add_dma(db_project, "USART2_RX", params={"NoSuchThing": "x"})
-    assert _dma_keys(db_project) == before
+    """参数名对不上库：照写并告警，不中断整条命令。"""
+    changes = ops.add_dma(db_project, "USART2_RX", params={"NoSuchThing": "x"})
+    assert any("⚠" in c and "NoSuchThing" in c for c in changes)
 
 
 def test_removing_a_request_does_not_touch_unrelated_pins(

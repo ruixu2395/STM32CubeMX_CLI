@@ -152,7 +152,22 @@ def test_gpio_page_lists_what_is_settable(tmp_ioc: Path, db_ready, capsys):
     for p in pins.values():
         assert "GPIO_Label" in p["settable"]
         assert "GPIOx" not in p["settable"] and "GPIO_Pin" not in p["settable"]
-        assert not any("Default" in n for n in p["settable"])
+        assert "GPIO_PULLUP" in p["options"]["GPIO_PuPd"]["values"]
+
+
+def test_gpio_ip_page_lists_plain_gpio_pins_with_options(tmp_ioc: Path, db_ready, capsys):
+    """``list <工程> GPIO``：GPIO 脚没有归属外设，以前一个都列不出来。
+    EXTI 的触发沿键 ``GPIO_ModeDefaultEXTI`` 必须在可设清单里、带可选值。"""
+    assert main(["add-gpio", str(tmp_ioc), "PE3", "--mode", "EXTI",
+                 "--set", "GPIO_ModeDefaultEXTI=GPIO_MODE_IT_FALLING"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["list", str(tmp_ioc), "GPIO", "--page", "gpio", "--json"]) == EXIT_OK
+    pins = {p["pin"]: p for p in json.loads(capsys.readouterr().out)["pins"]}
+
+    assert "PE3" in pins and "PA9" not in pins
+    pe3 = pins["PE3"]
+    assert pe3["params"]["GPIO_ModeDefaultEXTI"] == "GPIO_MODE_IT_FALLING"
+    assert "GPIO_MODE_IT_FALLING" in pe3["options"]["GPIO_ModeDefaultEXTI"]["values"]
 
 
 def test_param_page_uses_the_unconditional_default(tmp_ioc: Path, db_ready, capsys):

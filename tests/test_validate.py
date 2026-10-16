@@ -243,7 +243,27 @@ def test_param_value_out_of_range(db_project: IocProject):
     db_project.find_peripheral("USART1").set_param("Parity", "NONSENSE")
 
     found = issue(validate.validate(db_project), "param.bad_value")
-    assert "PARITY_NONE" in found.hint
+    assert "PARITY_NONE" in found.message
+    assert found.level == "error"
+
+
+def test_gpio_value_out_of_range(db_project: IocProject):
+    db_project.find_pin("PA9").set_property("GPIO_PuPd", "GPIO_UP")
+
+    found = issue(validate.validate(db_project), "gpio.bad_value")
+    assert found.level == "error"
+    assert "GPIO_PULLUP" in found.message
+
+
+def test_fast_mode_skips_mode_and_param_layers(db_project: IocProject):
+    db_project.find_peripheral("USART1").set_param("Parity", "NONSENSE")
+    assert "param.bad_value" not in codes(validate.validate(db_project, fast=True))
+
+
+def test_skip_checks_drops_the_named_layer(db_project: IocProject):
+    db_project.find_peripheral("USART1").set_param("Parity", "NONSENSE")
+    report = validate.validate(db_project, skip_checks={"parameters"})
+    assert "param.bad_value" not in codes(report)
 
 
 def test_virtual_mode_is_not_double_reported_as_a_param(db_project: IocProject):

@@ -120,6 +120,12 @@ def _verify_before_write(
     return None
 
 
+def _snapshot(project: IocProject, baseline: IocDocument) -> IocProject:
+    """改动前那一刻的工程（只读用，校验前后对比）。"""
+    return IocProject(IocDocument(dict(baseline.entries)), source=project.source,
+                      device=project.device)
+
+
 def _apply(
     project: IocProject,
     path: Path,
@@ -132,14 +138,30 @@ def _apply(
     # **必须在 mutate() 之前取**，之后取到的就是候选本身了。
     baseline = IocDocument(dict(project.doc.entries))
 
+    fast_mode = getattr(np, "fast", False)
+    skip_raw = getattr(np, "skip_checks", None)
+    skip_checks = {s.strip() for s in skip_raw.split(",") if s.strip()} if skip_raw else None
+
+    # 只拦**本次新引入**的错误：工程里原有的问题（老版本 CubeMX 留下的取值名等）
+    # 不该让之后每一条命令都写不进去。
+    pre_existing = {
+        (i.code, i.subject, i.message)
+        for i in validate.blocking_errors(
+            validate.validate(_snapshot(project, baseline), fast=fast_mode, skip_checks=skip_checks)
+        )
+    }
+
     try:
         changes = mutate()
     except (ops.OpError, ProjectError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    report = validate.validate(project)
-    blocking = validate.blocking_errors(report)
+    report = validate.validate(project, fast=fast_mode, skip_checks=skip_checks)
+    blocking = [
+        i for i in validate.blocking_errors(report)
+        if (i.code, i.subject, i.message) not in pre_existing
+    ]
 
     if changes:
         for c in changes:
@@ -477,7 +499,14 @@ def _render_pins(rows: tuple[ops.PinRow, ...]) -> None:
         label = f"  Label={p.label}" if p.label else ""
         print(f"  {p.pin:<8} Signal={p.signal or '-':<16} Mode={p.mode or '-':<14}{label}")
         print(f"      现在：{_kv(p.params)}")
-        print(f"      可设：{', '.join(p.settable)}")
+        opts = {n: (vals, dflt) for n, vals, dflt in p.options}
+        print("      可设：")
+        for n in p.settable:
+            if n in opts:
+                vals, dflt = opts[n]
+                print(f"        {n:<26} {' | '.join(vals)}" + (f"  （默认 {dflt}）" if dflt else ""))
+            else:
+                print(f"        {n}")
 
 
 #: JSON 里的页名 -> `--page` 的取值。两套名字不一样（`modes` 对 `mode`）。
@@ -546,7 +575,8 @@ def _list_one(project: IocProject, ip: str, page: str | None, as_json: bool) -> 
             ], page=page, missing=result.missing),
             "pins": _page("pins", [
                 {"pin": p.pin, "signal": p.signal, "mode": p.mode, "label": p.label,
-                 "params": dict(p.params), "settable": list(p.settable)}
+                 "params": dict(p.params), "settable": list(p.settable),
+                 "options": {n: {"values": list(v), "default": d} for n, v, d in p.options}}
                 for p in result.pins
             ], page=page, missing=result.missing),
         }, ensure_ascii=False, indent=2))
@@ -1122,6 +1152,11 @@ def _add_write_flags(p: argparse.ArgumentParser) -> None:
                    help="覆盖前不生成 .bak-<时间戳> 备份")
     p.add_argument("--force", action="store_true",
                    help="校验有错误也照样写入")
+    p.add_argument("--fast", action="store_true",
+                   help="快速模式：只跑核心校验（引脚能力+归属登记），跳过耗时的模式和参数检查")
+    p.add_argument("--skip-checks", metavar="检查项",
+                   help="跳过指定的校验项，多个用逗号分隔。可选：pin_capability,modes,parameters,"
+                        "registration,gpio_parameters,duplicate_signals,nvic_keys,irq_dma_orphans")
     p.add_argument(
         "--verify", action="store_true",
         help="落盘前让 CubeMX 走一次加载-保存往返，确认它接受这次的改动"
